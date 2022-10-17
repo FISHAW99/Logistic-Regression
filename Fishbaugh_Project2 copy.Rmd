@@ -1,0 +1,331 @@
+---
+title: "Project2_DataMiningFA22"
+author: "Adam Fishbaugh"
+date: "`r Sys.Date()`"
+output: html_document
+---
+#Load Libraries
+```{r, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(tidymodels)
+library(janitor)
+library(skimr)
+library(kableExtra)
+library(GGally)
+library(kableExtra) # -- make nice looking resutls when we knitt 
+library(vip)        # --  tidymodels variable importance
+library(fastshap)   # -- shapley values for variable importance 
+library(MASS)
+```
+
+
+#Load/ Clean Data
+```{r Load_Data, message=FALSE, warning=FALSE}
+raw_data <- read_csv("Data/inq05_samp.csv") %>% 
+  clean_names()
+
+head(raw_data)
+```
+
+
+#SKIM
+```{r skim_data, message=FALSE, warning=FALSE}
+raw_data %>% 
+  skim()
+```
+
+##Explore Target
+```{r explore_target, message=FALSE, warning=FALSE}
+#----0=not enrolled, 1=enrolled
+raw_data %>% 
+  ggplot(aes(x = enroll)) +
+  geom_histogram(stat = "count") +
+  theme(panel.background = element_rect(fill = "lightblue",
+                                colour = "white",
+                                size = 0.5, linetype = "solid"))+
+  labs(title = "Enrollment", x = "No/Yes")+
+  scale_y_continuous(name = "Count")
+
+
+#readout in percentages
+raw_data %>% 
+  group_by(enroll) %>% 
+  summarise(n=n()) %>% 
+  ungroup() %>% 
+  #------5% acceptance rate 
+  mutate(pct = n/sum(n))
+```
+
+
+#Explore Numerics
+
+```{r target_as_factor, message=FALSE, warning=FALSE}
+#make enroll and all ordinals a factor
+raw_data %>%
+    mutate_if(is.character, factor)
+
+head(raw_data)
+
+raw_data$enroll <- as.factor(raw_data$enroll)
+raw_data$mailq <- as.factor(raw_data$mailq)
+raw_data$campus_visit <- as.factor(raw_data$campus_visit)
+raw_data$instate <- as.factor(raw_data$instate)
+raw_data$recr_code <- as.factor(raw_data$recr_code)
+raw_data$mailq <- as.factor(raw_data$mailq)
+raw_data$premiere <- as.factor(raw_data$premiere)
+raw_data$stuemail <- as.factor(raw_data$stuemail)
+raw_data$int1rat <- as.factor(raw_data$int1rat)
+raw_data$int2rat <- as.factor(raw_data$int2rat)
+
+```
+
+Which seem to lead to enrollment?
+```{r rejected_comparitive_boxplots, message=FALSE, warning=FALSE}
+#rejected variables
+ggplot(raw_data, aes(x=enroll, y = satscore)) + geom_boxplot()+ 
+  labs(title = "satscore")
+ggplot(raw_data, aes(x=enroll, y = hscrat)) + geom_boxplot() + 
+     theme(panel.background = element_rect(fill = "pink",
+                                colour = "white",
+                                size = 0.5, linetype = "solid"))+
+  scale_y_continuous(name = "5 year Enrollment Rate") + 
+  labs(title = "High-school's alumni")
+
+
+
+```
+
+```{r not_rejected_comparitive_boxplots, message=FALSE, warning=FALSE}
+#not rejected
+##----- COntacts-----
+#!!!
+ggplot(raw_data, aes(x=enroll, y = self_init_cntcts)) + geom_boxplot() + 
+  labs(title = "self_init_cntcts")
+#!!!
+ggplot(raw_data, aes(x=enroll, y = solicited_cntcts)) + geom_boxplot() + 
+  labs(title = "solicited_cntcts")
+#!!!
+ggplot(raw_data, aes(x=enroll, y = travel_init_cntcts)) + geom_boxplot() + 
+  labs(title = "travel_init_cntcts")
+
+ggplot(raw_data, aes(x=enroll, y = total_contacts)) + geom_boxplot() + 
+   theme(panel.background = element_rect(fill = "orange",
+                                colour = "white",
+                                size = 0.5, linetype = "solid"))+
+  labs(title = "total_contacts")
+##-------------------------------
+ggplot(raw_data, aes(x=enroll, y = distance )) + geom_boxplot() + 
+  labs(title = "distance")
+ggplot(raw_data, aes(x=enroll, y = avg_income)) + geom_boxplot() + 
+   theme(panel.background = element_rect(fill = "lightblue",
+                                colour = "white",
+                                size = 0.5, linetype = "solid"))+
+  labs(title = "avg_income")
+
+ggplot(raw_data, aes(x=enroll, y = interest )) + geom_boxplot() + 
+  labs(title = "extracurriculars")
+#!!!
+ggplot(raw_data, aes(x=enroll, y = init_span )) + geom_boxplot() + 
+  labs(title = "time between first contact and enroll")
+```
+
+## Explore character variables  
+```{r explore_character_variables, message=FALSE, warning=FALSE}
+char_explore <- function(col){
+  
+ raw_data %>%
+    ggplot(., aes(!!as.name(col))) + 
+    geom_bar(aes(fill = respond), position = "fill") 
+}
+print(char_explore)
+```
+
+## Step1 Log: Partition data 70/30 (train / test split)
+```{r Partition Data, message=FALSE, warning=FALSE}
+#set repeat ability 
+set.seed(43)
+
+#train / test split 
+rawdata_split <- initial_split(raw_data, prop = 0.7)
+
+#training data 
+enroll_train <- training(rawdata_split)
+#extract the test data 
+enroll_test <- testing(rawdata_split)
+
+sprintf("Train PCT : %1.2f%%", nrow(enroll_train)/ nrow(raw_data) * 100)
+sprintf("Test  PCT : %1.2f%%", nrow(enroll_test)/ nrow(raw_data) * 100)
+
+```
+
+## Step2 Log: recipe
+```{r OG_Recipe, message=FALSE, warning=FALSE}
+enroll_recipe <- recipe(enroll ~ ., data = enroll_train) %>%
+    step_rm(academic_interest_1, int1rat, academic_interest_2, int2rat, contact_code1, contact_date1, ethn_code, irschool, level_year, satscore, sex, telecq, campus_visit, mailq) %>%
+    step_impute_median(all_numeric()) %>%
+    prep()
+
+enroll_recipe
+```
+
+##Step3 Log: Bake
+```{r OG_Bake, message=FALSE, warning=FALSE}
+#Apply Recipe to Train
+bake_train <- bake(enroll_recipe, new_data = enroll_train)
+#Apply Recipe to Test
+bake_test <- bake(enroll_recipe, new_data = enroll_test)
+```
+
+#Step4 Log: Fit Model
+```{r Model_1, message=FALSE, warning=FALSE}
+logistic_glm <-logistic_reg(mode = "classification") %>%
+                  set_engine("glm") %>%
+                  fit(enroll ~ ., data = bake_train)
+##Set Parameters
+tidy(logistic_glm) %>%
+  mutate_at(c("estimate", "std.error", "statistic", "p.value"),round, 4)
+```
+
+##Step5 Prep for Eval-- run predict on test and train bake
+```{r predict_bake, message=FALSE, warning=FALSE}
+#predict training 
+predict(logistic_glm, bake_train, type = "prob") %>%
+  bind_cols(.,predict(logistic_glm, bake_train)) %>%
+  bind_cols(.,bake_train) -> scored_train_glm
+
+head(scored_train_glm)
+
+# predict testing 
+predict(logistic_glm, bake_test, type = "prob") %>%
+  bind_cols(.,predict(logistic_glm, bake_test)) %>%
+  bind_cols(.,bake_test) -> scored_test_glm
+
+head(scored_test_glm)
+```
+
+```{r}
+#FLip ROC CURVE
+options(yardstick.event_first = FALSE)
+#AUC: Train and Test 
+scored_train_glm %>% 
+  #Generate metrics
+  metrics(enroll, .pred_1, estimate = .pred_class) %>%
+  mutate(part="training") %>%
+  bind_rows( scored_test_glm %>% 
+               metrics(enroll, .pred_1, estimate = .pred_class) %>%
+               mutate(part="testing") 
+  ) 
+
+
+#Variable:top 10
+logistic_glm %>%
+  vip(num_features = 10)
+
+
+
+#ROC Charts 
+scored_train_glm %>%
+  mutate(model = "train") %>%
+  bind_rows(scored_test_glm %>%
+              mutate(model="test")) %>%
+
+  group_by(model) %>%
+  roc_curve(enroll, .pred_1) %>%
+  autoplot()
+
+
+#Confusion Matrix  
+scored_train_glm %>%
+  #Actual target, predicted class
+  conf_mat(enroll, .pred_class) %>%
+  autoplot( type = "heatmap") +
+  labs(title="Train Confusion Matrix")
+
+scored_test_glm %>%
+  conf_mat(enroll, .pred_class) %>%
+  autoplot( type = "heatmap") +
+  labs(title="Test Confusion Matrix")
+```
+
+```{r stepwise, message=FALSE, warning=FALSE}
+# StepWise
+steplog <- glm(enroll ~ ., data = bake_train, 
+               family=binomial(link="logit"))
+step <- stepAIC(steplog, direction="both")
+summary(step)
+
+```
+
+```{r}
+steplog2 <- glm(enroll ~ self_init_cntcts + travel_init_cntcts + referral_cntcts +  premiere + interest + init_span + hscrat + avg_income + instate, data = bake_train, 
+               family=binomial(link="logit"))
+step2<- stepAIC(steplog2, direction="both")
+summary(step2)
+```
+
+```{r Model_2_Step}
+school_steprecipe <- recipe(enroll ~  self_init_cntcts + travel_init_cntcts + referral_cntcts +  premiere + interest + init_span + hscrat + avg_income + instate, data = enroll_train) %>%
+  step_impute_median(all_numeric()) %>%
+  prep()
+school_steprecipe
+
+
+# apply new recipe 
+bake_steptrain <- bake(school_steprecipe, new_data = enroll_train)
+bake_steptest  <- bake(school_steprecipe, new_data = enroll_test)
+
+logistic_step1 <-logistic_reg(mode = "classification") %>%
+                  set_engine("glm") %>%
+                  fit(enroll ~ ., data = bake_steptrain)
+
+
+#parameter estimates 
+tidy(logistic_step1) %>%
+  mutate_at(c("estimate", "std.error", "statistic", "p.value"),round, 4)
+```
+
+```{r}
+# -- training predictions from stepwise model
+predict(logistic_step1, bake_train, type = "prob") %>%
+  bind_cols(.,predict(logistic_step1, bake_train)) %>%
+  bind_cols(.,bake_train) -> scored_train_step1
+head(scored_train_step1)
+
+# -- testing predictions from stepwise model
+predict(logistic_step1, bake_test, type = "prob") %>%
+  bind_cols(.,predict(logistic_step1, bake_test)) %>%
+  bind_cols(.,bake_test) -> scored_test_step1
+head(scored_test_step1)
+```
+
+```{r}
+#AUC of stepwise
+scored_train_step1 %>% 
+  metrics(enroll, .pred_1, estimate = .pred_class) %>%
+  mutate(part="training") %>%
+  bind_rows( scored_test_step1 %>% 
+               metrics(enroll, .pred_1, estimate = .pred_class) %>%
+               mutate(part="testing") )
+#ROC Charts 
+scored_train_step1 %>%
+  mutate(model = "train") %>%
+  bind_rows(scored_test_step1 %>%
+              mutate(model="test")) %>%
+  group_by(model) %>%
+  roc_curve(enroll, .pred_1) %>%
+  autoplot()
+```
+
+```{r}
+# Confustion Matricies  fro updated model
+scored_train_step1 %>%
+  conf_mat(enroll, .pred_class) %>%
+  autoplot( type = "heatmap") +
+  labs(title="Train Confusion Matrix")
+
+scored_test_step1 %>%
+  conf_mat(enroll, .pred_class) %>%
+  autoplot( type = "heatmap") +
+  labs(title="Test Confusion Matrix")
+```
+
